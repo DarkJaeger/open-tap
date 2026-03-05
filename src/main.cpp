@@ -10,6 +10,7 @@
 #include <WiFi.h>
 #include <HTTPClient.h>
 #include <ArduinoJson.h>
+#include <Preferences.h>
 
 // Touchscreen pins
 //#define XPT2046_IRQ 36
@@ -48,9 +49,9 @@ bool settingsActive = false;
 
 double pnts = 0;
 
-char serverip[] = "192.168.123.123";
-char serverport[] = "8000";
-char kegid[] = "K2";
+char serverip[17] = "192.168.123.123";
+char serverport[7] = "8000";
+char kegid[7] = "K2";
 //char backcol[] = "0x0000";
 //char forecol[] = "0xF800";
 
@@ -169,8 +170,6 @@ void DrawScreen() {
           delay(100);
         }
 
-        drawSdJpeg(JLOGO2.c_str(), 0, 30);
-
         tft.fillScreen(TFT_BLACK);
         
         //Beer Name at the top
@@ -248,6 +247,7 @@ DeserializationError error = deserializeJson(doc, payload);
     Serial.print("Failed to parse JSON: ");
     Serial.println(error.c_str());
     settingschanged = false;
+    http.end();
     return;
   }
 
@@ -357,68 +357,39 @@ bool downloadImageToSD(const char* url, const char* filename) {
   }
 }
 
-// Read text from SD file
-String ReadText(const char* filename) {
-  File myfile = SD.open(filename, FILE_READ);
-  if (myfile) {
-    String value = myfile.readString();
-    myfile.close();
-    return value;
-  } else {
-    Serial.println("Error opening file");
-    return "";
-  }
-}
-
-// Split helper
-String Split(String data, char separator, int index) {
-  int found = 0;
-  int strIndex[] = {0, -1};
-  int maxIndex = data.length() - 1;
-  for (int i = 0; i <= maxIndex && found <= index; i++) {
-    if (data.charAt(i) == separator || i == maxIndex) {
-      found++;
-      strIndex[0] = strIndex[1] + 1;
-      strIndex[1] = (i == maxIndex) ? i + 1 : i;
-    }
-  }
-  return found > index ? data.substring(strIndex[0], strIndex[1]) : "";
-}
-
-// Load config from SD
+// Load config from NVS Preferences
 void LoadConfig() {
-  String ConfigString = ReadText("/settings.txt");
-  if (ConfigString == "") return;
+  Preferences prefs;
+  if (!prefs.begin("open-tap", true)) {
+    Serial.println("Failed to open Preferences (read-only)");
+    return;
+  }
 
-  SERV = Split(Split(ConfigString, '\n', 0), '=', 1);
-  PORT = Split(Split(ConfigString, '\n', 1), '=', 1);
-  KGID = Split(Split(ConfigString, '\n', 2), '=', 1);
-  //BCOL = Split(Split(ConfigString, '\n', 4), '=', 1);
-  //FCOL = Split(Split(ConfigString, '\n', 5), '=', 1);
+  SERV = prefs.getString("serv", SERV);
+  PORT = prefs.getString("port", PORT);
+  KGID = prefs.getString("kgid", KGID);
+  prefs.end();
 
   SERV.trim();
   PORT.trim();
   KGID.trim();
-  //BCOL.trim();
-  //FCOL.trim();
 
-  Serial.println(F("CONFIG Data Loaded!"));
-  //bgColor = (uint32_t) strtoul(BCOL.c_str(), NULL, 16);
-  //fgColor = (uint32_t) strtoul(FCOL.c_str(), NULL, 16);
+  Serial.println(F("CONFIG loaded from Preferences"));
 }
 
-// Write config to SD
+// Write config to NVS Preferences
 void WriteCONFIG() {
-  SD.remove("/settings.txt");
-  delay(100);
-  File myFile = SD.open("/settings.txt", FILE_WRITE);
-  if (myFile) {
-    myFile.print("SERV=" + SERV + '\n' + "PORT=" + PORT + '\n' + "KGID=" + KGID);
-    myFile.close();
-    Serial.println("CONFIG SAVED!");
-  } else {
-    Serial.println("Failed to write config file");
+  Preferences prefs;
+  if (!prefs.begin("open-tap", false)) {
+    Serial.println("Failed to open Preferences (read-write)");
+    return;
   }
+
+  prefs.putString("serv", SERV);
+  prefs.putString("port", PORT);
+  prefs.putString("kgid", KGID);
+  prefs.end();
+  Serial.println("CONFIG saved to Preferences");
 }
 
 // Display settings screen
@@ -626,9 +597,12 @@ if (!sdMounted) {
 
 //Just incase any settings have been modified - if not it should just resvae the settings it has already loaded.
 
-    strcpy(serverip, custom_server.getValue());
-    strcpy(serverport, custom__port.getValue());
-    strcpy(kegid, custom__kgid.getValue());
+    strncpy(serverip, custom_server.getValue(), sizeof(serverip) - 1);
+    serverip[sizeof(serverip) - 1] = '\0';
+    strncpy(serverport, custom__port.getValue(), sizeof(serverport) - 1);
+    serverport[sizeof(serverport) - 1] = '\0';
+    strncpy(kegid, custom__kgid.getValue(), sizeof(kegid) - 1);
+    kegid[sizeof(kegid) - 1] = '\0';
     //strcpy(backcol, custom__bg.getValue());
     //strcpy(forecol, custom__fg.getValue());
 
@@ -666,7 +640,7 @@ firstrun = false;
 }
 
 void loop() {
-  static unsigned long touchStartTime = 0;
+  static unsigned long pressStartTime = 0;
   static bool longPressTriggered = false;
 
   //TS_Point p = touchscreen.getPoint();
@@ -678,68 +652,74 @@ void loop() {
 int buttonState = digitalRead(bootButtonPin);
 
   if (buttonState == LOW) { // Button is pressed
-      longPressTriggered = true;
-      Serial.println("Long press detected! Opening settings...");
-      showsettings();
+      if (pressStartTime == 0) {
+        pressStartTime = millis();
+      }
 
-      WiFiManager wm;
-      WiFiManagerParameter custom_server("serverip", "Server IP:", SERV.c_str(), 16);
-      WiFiManagerParameter custom__port("serverport", "Server Port:", PORT.c_str(), 6);
-      WiFiManagerParameter custom__kgid("kegid", "Keg ID:", KGID.c_str(), 6);
-      //WiFiManagerParameter custom__bg("backcol", "Background Colour:", BCOL.c_str(), 6);
-      //WiFiManagerParameter custom__fg("forecol", "Font Colour:", FCOL.c_str(), 6);
+      if (!longPressTriggered && (millis() - pressStartTime >= 3000)) {
+        longPressTriggered = true;
+        Serial.println("Long press detected! Opening settings...");
+        showsettings();
 
-      wm.addParameter(&custom_server);
-      wm.addParameter(&custom__port);
-      wm.addParameter(&custom__kgid);
-      //wm.addParameter(&custom__bg);
-      //wm.addParameter(&custom__fg);
-      wm.setConfigPortalTimeout(timeout);
+        WiFiManager wm;
+        WiFiManagerParameter custom_server("serverip", "Server IP:", SERV.c_str(), 16);
+        WiFiManagerParameter custom__port("serverport", "Server Port:", PORT.c_str(), 6);
+        WiFiManagerParameter custom__kgid("kegid", "Keg ID:", KGID.c_str(), 6);
+        //WiFiManagerParameter custom__bg("backcol", "Background Colour:", BCOL.c_str(), 6);
+        //WiFiManagerParameter custom__fg("forecol", "Font Colour:", FCOL.c_str(), 6);
 
-        if (!wm.startConfigPortal("Beer-Tap-Screen","ilovebeer")) {
-          Serial.println("failed to connect and hit timeout");
-          delay(3000);
-          //reset and try again, or maybe put it to deep sleep
-          ESP.restart();
-        }
-          else
-        {
-          // only need to write the config if the settings were changes.
-          // if it times out then no change
+        wm.addParameter(&custom_server);
+        wm.addParameter(&custom__port);
+        wm.addParameter(&custom__kgid);
+        //wm.addParameter(&custom__bg);
+        //wm.addParameter(&custom__fg);
+        wm.setConfigPortalTimeout(timeout);
+
+          if (!wm.startConfigPortal("Beer-Tap-Screen","ilovebeer")) {
+            Serial.println("failed to connect and hit timeout");
+            delay(3000);
+            //reset and try again, or maybe put it to deep sleep
+            ESP.restart();
+          }
+            else
+          {
+            // only need to write the config if the settings were changes.
+            // if it times out then no change
 
 
-          SERV = custom_server.getValue();
-          PORT = custom__port.getValue();
-          KGID = custom__kgid.getValue();
+            SERV = custom_server.getValue();
+            PORT = custom__port.getValue();
+            KGID = custom__kgid.getValue();
 
-          Serial.println ("New values from config page:");
-          Serial.println ("S=" + SERV);
-          Serial.println ("P=" + PORT);
-          Serial.println ("K=" + KGID);
+            Serial.println ("New values from config page:");
+            Serial.println ("S=" + SERV);
+            Serial.println ("P=" + PORT);
+            Serial.println ("K=" + KGID);
 
-          //WriteCONFIG();
+            //WriteCONFIG();
 
-            if (SERV == "" || PORT == "" || KGID == ""){
-                Serial.println("LOOP - At least one of the values returned from wifi config was blank");
-                Serial.println("LOOP - Not saving CONFIG.");
-                LoadConfig();
-            } else {
-                Serial.println("LOOP - All of the values returned from wifi config were NON BLANK");
-                Serial.println("LOOP - SAVING CONFIG.");
-                WriteCONFIG();
-            }
-        delay(200); // Simple debounce
-        }
-     
+              if (SERV == "" || PORT == "" || KGID == ""){
+                  Serial.println("LOOP - At least one of the values returned from wifi config was blank");
+                  Serial.println("LOOP - Not saving CONFIG.");
+                  LoadConfig();
+              } else {
+                  Serial.println("LOOP - All of the values returned from wifi config were NON BLANK");
+                  Serial.println("LOOP - SAVING CONFIG.");
+                  WriteCONFIG();
+              }
+          delay(200); // Simple debounce
+          }
 
-          settingschanged = true;
-          firstrun = true;
-        }
+
+            settingschanged = true;
+            firstrun = true;
+          }
+      }
  
 
     else {
         // No valid touch -> reset timer and flag
-        touchStartTime = 0;
+        pressStartTime = 0;
         longPressTriggered = false;
     }
 
