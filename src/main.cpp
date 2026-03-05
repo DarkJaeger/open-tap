@@ -62,11 +62,11 @@ bool firstrun = true;
 String SERV = "192.168.8.123";
 String PORT = "8000";
 String KGID = "K2";
-//String BCOL = "";
-//String FCOL = "";
+String BCOL = "0000";
+String FCOL = "FD20";
 
-//uint32_t bgColor;
-//uint32_t fgColor;
+uint16_t bgColor = TFT_BLACK;
+uint16_t fgColor = TFT_ORANGE;
 
 String JDBID2 = "";
 String JNAME2 = "";
@@ -82,6 +82,40 @@ int centerX, centerY;
 
 //XPT2046_Touchscreen touchscreen(XPT2046_CS, XPT2046_IRQ);
 SPIClass touchscreenSPI = SPIClass(HSPI);
+
+uint16_t parseColor565(String value, uint16_t fallback) {
+  value.trim();
+  if (value.startsWith("0x") || value.startsWith("0X")) {
+    value = value.substring(2);
+  } else if (value.startsWith("#")) {
+    value = value.substring(1);
+  }
+
+  if (value.length() == 0 || value.length() > 4) {
+    return fallback;
+  }
+
+  char* endPtr = nullptr;
+  long parsed = strtol(value.c_str(), &endPtr, 16);
+  if (endPtr == value.c_str() || *endPtr != '\0' || parsed < 0 || parsed > 0xFFFF) {
+    return fallback;
+  }
+
+  return static_cast<uint16_t>(parsed);
+}
+
+String formatColor565(uint16_t color) {
+  char out[5];
+  snprintf(out, sizeof(out), "%04X", color);
+  return String(out);
+}
+
+void ApplyConfiguredColors() {
+  bgColor = parseColor565(BCOL, TFT_BLACK);
+  fgColor = parseColor565(FCOL, TFT_ORANGE);
+  BCOL = formatColor565(bgColor);
+  FCOL = formatColor565(fgColor);
+}
 
 
 double KGtoPints(double empt, double full, double cur){
@@ -137,13 +171,14 @@ uint32_t barColor;
 
   //if (firstrun == true || settingschanged == true){
         tft.fillRect(1,32,15,200,barColor);
-        tft.fillRect(1,32,15,200 - BeerPercentage,TFT_BLACK);
+        tft.fillRect(1,32,15,200 - BeerPercentage,bgColor);
         
         //Right side bar
         // Fill the whole bar with colour
         tft.fillRect(224,32,15,200,barColor);
         // Top X, Y are static. Height is variable by percentage inverse
-        tft.fillRect(224,32,15,200 - BeerPercentage,TFT_BLACK);
+        tft.fillRect(224,32,15,200 - BeerPercentage,bgColor);
+        tft.setTextColor(fgColor, bgColor);
         tft.drawCentreString("[Approx " + String(round(pnts)) + " Pints remaining]", centerX, 236, 2);
  // }
 }
@@ -170,31 +205,31 @@ void DrawScreen() {
           delay(100);
         }
 
-        tft.fillScreen(TFT_BLACK);
+        tft.fillScreen(bgColor);
         
         //Beer Name at the top
-        tft.setTextColor(TFT_ORANGE, TFT_BLACK);
-        tft.fillRect(0,0,240,29,TFT_BLACK);
-        tft.drawRect(0,0,240,29,TFT_ORANGE);
+        tft.setTextColor(fgColor, bgColor);
+        tft.fillRect(0,0,240,29,bgColor);
+        tft.drawRect(0,0,240,29,fgColor);
         tft.drawCentreString(JNAME2, centerX, 10, 2);
 
         // 200 x 200 beer logo
-        tft.fillRect(19,31,202,202,TFT_BLACK);
-        tft.drawRect(19,31,202,202,TFT_ORANGE);
+        tft.fillRect(19,31,202,202,bgColor);
+        tft.drawRect(19,31,202,202,fgColor);
         //tft.drawCentreString(JDESC2, centerX, 270, 2);
 
         //Left side bar
-        tft.fillRect(0,31,17,202,TFT_BLACK);
-        tft.drawRect(0,31,17,202,TFT_ORANGE);
+        tft.fillRect(0,31,17,202,bgColor);
+        tft.drawRect(0,31,17,202,fgColor);
 
         //Right side bar
-        tft.fillRect(223,31,17,202,TFT_BLACK);
-        tft.drawRect(223,31,17,202,TFT_ORANGE);
+        tft.fillRect(223,31,17,202,bgColor);
+        tft.drawRect(223,31,17,202,fgColor);
 
         //bottom text + Keg id
-        tft.fillRect(0,235,240,84,TFT_BLACK);
-        tft.drawRect(0,235,240,84,TFT_ORANGE);
-        tft.drawRect(0,235,240,20,TFT_ORANGE);
+        tft.fillRect(0,235,240,84,bgColor);
+        tft.drawRect(0,235,240,84,fgColor);
+        tft.drawRect(0,235,240,20,fgColor);
 
         tft.drawCentreString("[Approx " + String(round(pnts)) + " Pints remaining]", centerX, 236, 2);
         
@@ -368,11 +403,16 @@ void LoadConfig() {
   SERV = prefs.getString("serv", SERV);
   PORT = prefs.getString("port", PORT);
   KGID = prefs.getString("kgid", KGID);
+  BCOL = prefs.getString("bcol", BCOL);
+  FCOL = prefs.getString("fcol", FCOL);
   prefs.end();
 
   SERV.trim();
   PORT.trim();
   KGID.trim();
+  BCOL.trim();
+  FCOL.trim();
+  ApplyConfiguredColors();
 
   Serial.println(F("CONFIG loaded from Preferences"));
 }
@@ -388,14 +428,16 @@ void WriteCONFIG() {
   prefs.putString("serv", SERV);
   prefs.putString("port", PORT);
   prefs.putString("kgid", KGID);
+  prefs.putString("bcol", BCOL);
+  prefs.putString("fcol", FCOL);
   prefs.end();
   Serial.println("CONFIG saved to Preferences");
 }
 
 // Display settings screen
 void showsettings() {
-  tft.fillScreen(TFT_BLACK);
-  tft.setTextColor(TFT_ORANGE, TFT_BLACK);
+  tft.fillScreen(bgColor);
+  tft.setTextColor(fgColor, bgColor);
   tft.setTextDatum(MC_DATUM);
   tft.drawCentreString("The screen has been put into", tft.width() / 2, 20, 2);
   tft.drawCentreString("Access point mode.", tft.width() / 2, 40, 2);
@@ -522,8 +564,8 @@ void setup() {
   tft.init();
   tft.setRotation(0);
 
-  tft.fillScreen(TFT_BLACK);
-  tft.setTextColor(TFT_BLACK, TFT_ORANGE);//
+  tft.fillScreen(bgColor);
+  tft.setTextColor(fgColor, bgColor);//
    Serial.println("TFT On.");
 //########################################################################
 
@@ -562,6 +604,8 @@ if (!sdMounted) {
   Serial.println("SETUP - LOADING CONFIG....");
 
   LoadConfig();
+  tft.fillScreen(bgColor);
+  tft.setTextColor(fgColor, bgColor);
 
   centerX = SCREEN_WIDTH / 2;
   centerY = SCREEN_HEIGHT / 2;
@@ -570,11 +614,15 @@ if (!sdMounted) {
   WiFiManagerParameter custom_server("serverip", "Server IP:", SERV.c_str(), 16);
   WiFiManagerParameter custom__port("serverport", "Server Port:", PORT.c_str(), 6);
   WiFiManagerParameter custom__kgid("kegid", "Keg ID:", KGID.c_str(), 6);
+  WiFiManagerParameter custom__bg("backcol", "Background Colour (hex 0000-FFFF):", BCOL.c_str(), 8);
+  WiFiManagerParameter custom__fg("forecol", "Foreground Colour (hex 0000-FFFF):", FCOL.c_str(), 8);
 
 
   wm.addParameter(&custom_server);
   wm.addParameter(&custom__port);
   wm.addParameter(&custom__kgid);
+  wm.addParameter(&custom__bg);
+  wm.addParameter(&custom__fg);
 
   tft.drawCentreString("No Wifi. Connect to", centerX, 30, FONT_SIZE);
   tft.drawCentreString("Wifi: Beer-Tap-Screen ", centerX, 60, FONT_SIZE);
@@ -585,14 +633,14 @@ if (!sdMounted) {
   bool res = wm.autoConnect("Beer-Tap-Screen", "ilovebeer");
   if (!res) {
     Serial.println("Failed to connect to wifi");
-    tft.fillScreen(TFT_BLACK);
+    tft.fillScreen(bgColor);
     tft.drawCentreString("Failed to connect.", centerX, 30, FONT_SIZE);
     tft.drawCentreString("Device will restart.", centerX, 60, FONT_SIZE);
     delay(5000);
     ESP.restart();
   } else {
     Serial.println("Connected to wifi! :)");
-    tft.fillScreen(TFT_BLACK);
+    tft.fillScreen(bgColor);
     tft.drawCentreString("Connected to Wifi!", centerX, 30, FONT_SIZE);
 
 //Just incase any settings have been modified - if not it should just resvae the settings it has already loaded.
@@ -603,28 +651,26 @@ if (!sdMounted) {
     serverport[sizeof(serverport) - 1] = '\0';
     strncpy(kegid, custom__kgid.getValue(), sizeof(kegid) - 1);
     kegid[sizeof(kegid) - 1] = '\0';
-    //strcpy(backcol, custom__bg.getValue());
-    //strcpy(forecol, custom__fg.getValue());
-
     SERV = custom_server.getValue();
     PORT = custom__port.getValue();
     KGID = custom__kgid.getValue();
-    //BCOL = custom__bg.getValue();
-    //FCOL = custom__fg.getValue();
+    BCOL = custom__bg.getValue();
+    FCOL = custom__fg.getValue();
+    BCOL.trim();
+    FCOL.trim();
+    ApplyConfiguredColors();
 
     Serial.println ("S=" + SERV);
     Serial.println ("P=" + PORT);
     Serial.println ("K=" + KGID);
-    //Serial.println ("B=" + BCOL);
-    //Serial.println ("F=" + FCOL);
-
-    //bgColor = (uint32_t) strtoul(BCOL.c_str(), NULL, 16);
-    //fgColor = (uint32_t) strtoul(FCOL.c_str(), NULL, 16);
+    Serial.println ("B=" + BCOL);
+    Serial.println ("F=" + FCOL);
 
   // write them to config so they arent forgotten
-  if (SERV == "" || PORT == "" || KGID == ""){
+  if (SERV == "" || PORT == "" || KGID == "" || BCOL == "" || FCOL == ""){
       Serial.println("At least one of the values returned from wifi config was blank");
       Serial.println("Not saving CONFIG.");
+      LoadConfig();
   } else {
       Serial.println("All of the values returned from wifi config were NON BLANK");
       Serial.println("SAVING CONFIG.");
@@ -665,14 +711,14 @@ int buttonState = digitalRead(bootButtonPin);
         WiFiManagerParameter custom_server("serverip", "Server IP:", SERV.c_str(), 16);
         WiFiManagerParameter custom__port("serverport", "Server Port:", PORT.c_str(), 6);
         WiFiManagerParameter custom__kgid("kegid", "Keg ID:", KGID.c_str(), 6);
-        //WiFiManagerParameter custom__bg("backcol", "Background Colour:", BCOL.c_str(), 6);
-        //WiFiManagerParameter custom__fg("forecol", "Font Colour:", FCOL.c_str(), 6);
+        WiFiManagerParameter custom__bg("backcol", "Background Colour (hex 0000-FFFF):", BCOL.c_str(), 8);
+        WiFiManagerParameter custom__fg("forecol", "Foreground Colour (hex 0000-FFFF):", FCOL.c_str(), 8);
 
         wm.addParameter(&custom_server);
         wm.addParameter(&custom__port);
         wm.addParameter(&custom__kgid);
-        //wm.addParameter(&custom__bg);
-        //wm.addParameter(&custom__fg);
+        wm.addParameter(&custom__bg);
+        wm.addParameter(&custom__fg);
         wm.setConfigPortalTimeout(timeout);
 
           if (!wm.startConfigPortal("Beer-Tap-Screen","ilovebeer")) {
@@ -690,15 +736,22 @@ int buttonState = digitalRead(bootButtonPin);
             SERV = custom_server.getValue();
             PORT = custom__port.getValue();
             KGID = custom__kgid.getValue();
+            BCOL = custom__bg.getValue();
+            FCOL = custom__fg.getValue();
+            BCOL.trim();
+            FCOL.trim();
+            ApplyConfiguredColors();
 
             Serial.println ("New values from config page:");
             Serial.println ("S=" + SERV);
             Serial.println ("P=" + PORT);
             Serial.println ("K=" + KGID);
+            Serial.println ("B=" + BCOL);
+            Serial.println ("F=" + FCOL);
 
             //WriteCONFIG();
 
-              if (SERV == "" || PORT == "" || KGID == ""){
+              if (SERV == "" || PORT == "" || KGID == "" || BCOL == "" || FCOL == ""){
                   Serial.println("LOOP - At least one of the values returned from wifi config was blank");
                   Serial.println("LOOP - Not saving CONFIG.");
                   LoadConfig();
