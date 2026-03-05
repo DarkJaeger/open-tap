@@ -52,8 +52,6 @@ double pnts = 0;
 char serverip[17] = "192.168.123.123";
 char serverport[7] = "8000";
 char kegid[7] = "K2";
-//char backcol[] = "0x0000";
-//char forecol[] = "0xF800";
 
 bool shouldSaveConfig = false;
 bool settingschanged = false;
@@ -62,8 +60,11 @@ bool firstrun = true;
 String SERV = "192.168.8.123";
 String PORT = "8000";
 String KGID = "K2";
+String STYP = "Plaato";
 String BCOL = "0000";
 String FCOL = "FD20";
+
+//https://rgbcolorpicker.com/565
 
 uint16_t bgColor = TFT_BLACK;
 uint16_t fgColor = TFT_ORANGE;
@@ -115,6 +116,15 @@ void ApplyConfiguredColors() {
   fgColor = parseColor565(FCOL, TFT_ORANGE);
   BCOL = formatColor565(bgColor);
   FCOL = formatColor565(fgColor);
+}
+
+String normalizeServerType(const String& rawType) {
+  String type = rawType;
+  type.trim();
+
+  if (type.equalsIgnoreCase("plaato")) return "Plaato";
+  if (type.equalsIgnoreCase("kinko")) return "Kinko";
+  return "Plaato";
 }
 
 
@@ -255,7 +265,7 @@ void DrawScreen() {
 }
 
 //Get JSON from the brewserver
-void GetJSON(String svr, String prt) {
+void GetJSONsk(String svr, String prt) {
    
   if (WiFi.status() == WL_CONNECTED) {
     HTTPClient http;
@@ -403,6 +413,7 @@ void LoadConfig() {
   SERV = prefs.getString("serv", SERV);
   PORT = prefs.getString("port", PORT);
   KGID = prefs.getString("kgid", KGID);
+  STYP = prefs.getString("styp", STYP);
   BCOL = prefs.getString("bcol", BCOL);
   FCOL = prefs.getString("fcol", FCOL);
   prefs.end();
@@ -410,6 +421,7 @@ void LoadConfig() {
   SERV.trim();
   PORT.trim();
   KGID.trim();
+  STYP = normalizeServerType(STYP);
   BCOL.trim();
   FCOL.trim();
   ApplyConfiguredColors();
@@ -428,6 +440,7 @@ void WriteCONFIG() {
   prefs.putString("serv", SERV);
   prefs.putString("port", PORT);
   prefs.putString("kgid", KGID);
+  prefs.putString("styp", STYP);
   prefs.putString("bcol", BCOL);
   prefs.putString("fcol", FCOL);
   prefs.end();
@@ -611,9 +624,20 @@ if (!sdMounted) {
   centerY = SCREEN_HEIGHT / 2;
 
   WiFiManager wm;
+  String normalizedSetupServerType = normalizeServerType(STYP);
+  String setupServerTypeSelectHtml = "<br/><label for='server_type_select'>Server Type (Plaato/Kinko):</label>"
+                                     "<select id='server_type_select' onchange=\"document.getElementById('server_type').value=this.value\">"
+                                     "<option value='Plaato'";
+  if (normalizedSetupServerType == "Plaato") setupServerTypeSelectHtml += " selected";
+  setupServerTypeSelectHtml += ">Plaato</option><option value='Kinko'";
+  if (normalizedSetupServerType == "Kinko") setupServerTypeSelectHtml += " selected";
+  setupServerTypeSelectHtml += ">Kinko</option></select>"
+                               "<script>document.getElementById('server_type').value=document.getElementById('server_type_select').value;</script>";
   WiFiManagerParameter custom_server("serverip", "Server IP:", SERV.c_str(), 16);
   WiFiManagerParameter custom__port("serverport", "Server Port:", PORT.c_str(), 6);
   WiFiManagerParameter custom__kgid("kegid", "Keg ID:", KGID.c_str(), 6);
+  WiFiManagerParameter custom__styp("server_type", "", normalizedSetupServerType.c_str(), 6, "type='hidden'", WFM_NO_LABEL);
+  WiFiManagerParameter custom__styp_select(setupServerTypeSelectHtml.c_str());
   WiFiManagerParameter custom__bg("backcol", "Background Colour (hex 0000-FFFF):", BCOL.c_str(), 8);
   WiFiManagerParameter custom__fg("forecol", "Foreground Colour (hex 0000-FFFF):", FCOL.c_str(), 8);
 
@@ -621,6 +645,8 @@ if (!sdMounted) {
   wm.addParameter(&custom_server);
   wm.addParameter(&custom__port);
   wm.addParameter(&custom__kgid);
+  wm.addParameter(&custom__styp);
+  wm.addParameter(&custom__styp_select);
   wm.addParameter(&custom__bg);
   wm.addParameter(&custom__fg);
 
@@ -654,6 +680,7 @@ if (!sdMounted) {
     SERV = custom_server.getValue();
     PORT = custom__port.getValue();
     KGID = custom__kgid.getValue();
+    STYP = normalizeServerType(custom__styp.getValue());
     BCOL = custom__bg.getValue();
     FCOL = custom__fg.getValue();
     BCOL.trim();
@@ -663,11 +690,12 @@ if (!sdMounted) {
     Serial.println ("S=" + SERV);
     Serial.println ("P=" + PORT);
     Serial.println ("K=" + KGID);
+    Serial.println ("T=" + STYP);
     Serial.println ("B=" + BCOL);
     Serial.println ("F=" + FCOL);
 
   // write them to config so they arent forgotten
-  if (SERV == "" || PORT == "" || KGID == "" || BCOL == "" || FCOL == ""){
+  if (SERV == "" || PORT == "" || KGID == "" || STYP == "" || BCOL == "" || FCOL == ""){
       Serial.println("At least one of the values returned from wifi config was blank");
       Serial.println("Not saving CONFIG.");
       LoadConfig();
@@ -679,7 +707,7 @@ if (!sdMounted) {
     delay(6000);
   }
 Serial.println("SETUP - REQUESTING JSON.");
-GetJSON(SERV, PORT);
+GetJSONsk(SERV, PORT);
 Serial.println("SETUP - DRAW SCREEN.");
 DrawScreen();
 firstrun = false;
@@ -708,15 +736,28 @@ int buttonState = digitalRead(bootButtonPin);
         showsettings();
 
         WiFiManager wm;
+        String normalizedLoopServerType = normalizeServerType(STYP);
+        String loopServerTypeSelectHtml = "<br/><label for='server_type_select'>Server Type (Plaato/Kinko):</label>"
+                                          "<select id='server_type_select' onchange=\"document.getElementById('server_type').value=this.value\">"
+                                          "<option value='Plaato'";
+        if (normalizedLoopServerType == "Plaato") loopServerTypeSelectHtml += " selected";
+        loopServerTypeSelectHtml += ">Plaato</option><option value='Kinko'";
+        if (normalizedLoopServerType == "Kinko") loopServerTypeSelectHtml += " selected";
+        loopServerTypeSelectHtml += ">Kinko</option></select>"
+                                    "<script>document.getElementById('server_type').value=document.getElementById('server_type_select').value;</script>";
         WiFiManagerParameter custom_server("serverip", "Server IP:", SERV.c_str(), 16);
         WiFiManagerParameter custom__port("serverport", "Server Port:", PORT.c_str(), 6);
         WiFiManagerParameter custom__kgid("kegid", "Keg ID:", KGID.c_str(), 6);
+        WiFiManagerParameter custom__styp("server_type", "", normalizedLoopServerType.c_str(), 6, "type='hidden'", WFM_NO_LABEL);
+        WiFiManagerParameter custom__styp_select(loopServerTypeSelectHtml.c_str());
         WiFiManagerParameter custom__bg("backcol", "Background Colour (hex 0000-FFFF):", BCOL.c_str(), 8);
         WiFiManagerParameter custom__fg("forecol", "Foreground Colour (hex 0000-FFFF):", FCOL.c_str(), 8);
 
         wm.addParameter(&custom_server);
         wm.addParameter(&custom__port);
         wm.addParameter(&custom__kgid);
+        wm.addParameter(&custom__styp);
+        wm.addParameter(&custom__styp_select);
         wm.addParameter(&custom__bg);
         wm.addParameter(&custom__fg);
         wm.setConfigPortalTimeout(timeout);
@@ -736,6 +777,7 @@ int buttonState = digitalRead(bootButtonPin);
             SERV = custom_server.getValue();
             PORT = custom__port.getValue();
             KGID = custom__kgid.getValue();
+            STYP = normalizeServerType(custom__styp.getValue());
             BCOL = custom__bg.getValue();
             FCOL = custom__fg.getValue();
             BCOL.trim();
@@ -746,12 +788,13 @@ int buttonState = digitalRead(bootButtonPin);
             Serial.println ("S=" + SERV);
             Serial.println ("P=" + PORT);
             Serial.println ("K=" + KGID);
+            Serial.println ("T=" + STYP);
             Serial.println ("B=" + BCOL);
             Serial.println ("F=" + FCOL);
 
             //WriteCONFIG();
 
-              if (SERV == "" || PORT == "" || KGID == "" || BCOL == "" || FCOL == ""){
+              if (SERV == "" || PORT == "" || KGID == "" || STYP == "" || BCOL == "" || FCOL == ""){
                   Serial.println("LOOP - At least one of the values returned from wifi config was blank");
                   Serial.println("LOOP - Not saving CONFIG.");
                   LoadConfig();
@@ -778,7 +821,7 @@ int buttonState = digitalRead(bootButtonPin);
 
 
   // Normal operations
-  GetJSON(SERV, PORT);
+  GetJSONsk(SERV, PORT);
 
 double br = beerRemaining(JKCAP2.toDouble(),JKEMP2.toDouble(),JKCUR2.toDouble());
 
