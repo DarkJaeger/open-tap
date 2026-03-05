@@ -756,6 +756,7 @@ pnts = KGtoPints(JKEMP2.toDouble(),JKCAP2.toDouble(),JKCUR2.toDouble());
 //Serial.println("EMPT: " + JKEMP2);
 //Serial.println("CUR: " + JKCUR2);
 //Serial.println("Percentage Remaining: " + String(br));
+//test
   
   DrawScreen();
   DrawRemaining(br);
