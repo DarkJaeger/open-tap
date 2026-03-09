@@ -56,6 +56,7 @@ char kegid[7] = "K2";
 bool shouldSaveConfig = false;
 bool settingschanged = false;
 bool firstrun = true;
+bool barNeedsFullRefresh = true;
 
 String SERV = "192.168.8.123";
 String PORT = "8000";
@@ -176,21 +177,54 @@ uint32_t barColor;
     barColor = TFT_GREEN;
     //Serial.println("Beer Green");
   }
-// First we will fill the whole bar with the colour
-// then overlay the black to show the remaining
 
-  //if (firstrun == true || settingschanged == true){
-        tft.fillRect(1,32,15,200,barColor);
-        tft.fillRect(1,32,15,200 - BeerPercentage,bgColor);
-        
-        //Right side bar
-        // Fill the whole bar with colour
-        tft.fillRect(224,32,15,200,barColor);
-        // Top X, Y are static. Height is variable by percentage inverse
-        tft.fillRect(224,32,15,200 - BeerPercentage,bgColor);
-        tft.setTextColor(fgColor, bgColor);
-        tft.drawCentreString("[Approx " + String(round(pnts)) + " Pints remaining]", centerX, 236, 2);
- // }
+  const int barLeftX = 1;
+  const int barRightX = 224;
+  const int barY = 32;
+  const int barW = 15;
+  const int barH = 200;
+
+  int fillHeight = static_cast<int>(round(BeerPercentage));
+  if (fillHeight < 0) fillHeight = 0;
+  if (fillHeight > barH) fillHeight = barH;
+
+  static int lastFillHeight = -1;
+  static uint32_t lastBarColor = 0;
+  static int lastPintsRounded = -1;
+
+  bool forceFull = barNeedsFullRefresh || lastFillHeight < 0 || lastBarColor != barColor;
+
+  if (forceFull) {
+    // Full paint only when needed: startup, theme refresh, or color threshold change.
+    tft.fillRect(barLeftX, barY, barW, barH, barColor);
+    tft.fillRect(barRightX, barY, barW, barH, barColor);
+    tft.fillRect(barLeftX, barY, barW, barH - fillHeight, bgColor);
+    tft.fillRect(barRightX, barY, barW, barH - fillHeight, bgColor);
+  } else if (fillHeight != lastFillHeight) {
+    int delta = fillHeight - lastFillHeight;
+    if (delta > 0) {
+      int growY = barY + (barH - fillHeight);
+      tft.fillRect(barLeftX, growY, barW, delta, barColor);
+      tft.fillRect(barRightX, growY, barW, delta, barColor);
+    } else {
+      int shrinkH = -delta;
+      int clearY = barY + (barH - lastFillHeight);
+      tft.fillRect(barLeftX, clearY, barW, shrinkH, bgColor);
+      tft.fillRect(barRightX, clearY, barW, shrinkH, bgColor);
+    }
+  }
+
+  int roundedPints = static_cast<int>(round(pnts));
+  if (forceFull || roundedPints != lastPintsRounded) {
+    tft.setTextColor(fgColor, bgColor);
+    tft.fillRect(1, 236, 238, 18, bgColor);
+    tft.drawCentreString("[Approx " + String(roundedPints) + " Pints remaining]", centerX, 236, 2);
+    lastPintsRounded = roundedPints;
+  }
+
+  lastFillHeight = fillHeight;
+  lastBarColor = barColor;
+  barNeedsFullRefresh = false;
 }
 
 
@@ -259,10 +293,109 @@ void DrawScreen() {
 
 
         drawSdJpeg(JLOGO2.c_str(), 20, 32);
+        barNeedsFullRefresh = true;
         settingschanged = false;
     }
 
 }
+
+//Get JSON from Plaato Keg Server
+void GetJSONplaato(String svr, String prt) {
+   
+  if (WiFi.status() == WL_CONNECTED) {
+    HTTPClient http;
+
+    // Build URL
+    String url = "http://" + svr + ":" + prt + "/get_keg/" + KGID; // Add endpoint if needed
+    Serial.println("Sending GET to: " + url);
+
+    http.begin(url); // Initialise HTTP connection
+    int httpCode = http.GET(); // Send GET request
+
+    if (httpCode > 0) {
+      Serial.printf("HTTP Response code: %d\n", httpCode);
+      String payload = http.getString(); // Get response body
+      Serial.println("Response: " + payload);
+
+// JSON PROCESSOR HERE ###########
+JsonDocument doc;
+//StaticJsonDocument<200> doc;
+DeserializationError error = deserializeJson(doc, payload);
+
+
+  if (error) {
+    Serial.print("Failed to parse JSON: ");
+    Serial.println(error.c_str());
+    settingschanged = false;
+    http.end();
+    return;
+  }
+
+  settingschanged = false;
+
+  // ADD ALL NEW PROCESSING HERE FOR JSON FROM PLAATO
+
+  String JDBID = doc["id"];
+    if (JDBID != JDBID2){
+    JDBID2 = JDBID;
+    settingschanged = true;
+    }
+  String JNAME = doc["name"];
+    if (JNAME != JNAME2){
+    JNAME2 = JNAME;
+    settingschanged = true;
+    }
+  String JDESC = doc["description"]; 
+    if (JDESC != JDESC2){
+    JDESC2 = JDESC;
+    settingschanged = true;
+    }
+  String JLOGO = doc["logo_url"];
+    if (JLOGO != JLOGO2){
+        JLOGO2 = JLOGO;
+        settingschanged = true;
+      }
+      
+  String JKCAP = doc["keg_capacity"];
+    if (JKCAP != JKCAP2){
+    JKCAP2 = JKCAP;
+    settingschanged = true;
+    }
+  String JKEMP = doc["empty_keg_weight"];
+    if (JKEMP != JKEMP2){
+    JKEMP2 = JKEMP;
+    settingschanged = true;
+    }
+  String JKCUR = doc["current_weight"];
+      if (JKCUR != JKCUR2) {
+        JKCUR2 = JKCUR;
+        //settingschanged = true;
+    }
+
+  String JKGID = doc["keg_id"];
+    if (JKGID != JKGID2){
+    JKGID2 = JKGID;
+    settingschanged = true;
+    }
+
+
+ // Serial.println("Parsed Data:");
+  //Serial.println("Beer Name: " + JNAME);
+  //Serial.println("Logo URL: " + JLOGO);
+  //Serial.println("Keg ID: " + JKGID);
+
+//###############################
+
+    } else {
+      Serial.printf("HTTP GET failed, error: %s\n", http.errorToString(httpCode).c_str());
+    }
+
+    http.end(); // Close connection
+  } else {
+    Serial.println("WiFi not connected!");
+  }
+}
+
 
 //Get JSON from the brewserver
 void GetJSONsk(String svr, String prt) {
@@ -358,6 +491,7 @@ DeserializationError error = deserializeJson(doc, payload);
     Serial.println("WiFi not connected!");
   }
 }
+
 
 bool downloadImageToSD(const char* url, const char* filename) {
   if (WiFi.status() != WL_CONNECTED) {
@@ -707,7 +841,15 @@ if (!sdMounted) {
     delay(6000);
   }
 Serial.println("SETUP - REQUESTING JSON.");
-GetJSONsk(SERV, PORT);
+
+if (STYP = "Kinko"){
+  GetJSONsk(SERV, PORT);
+}
+else{
+  GetJSONplaato(SERV, PORT);
+}
+
+
 Serial.println("SETUP - DRAW SCREEN.");
 DrawScreen();
 firstrun = false;
@@ -821,7 +963,12 @@ int buttonState = digitalRead(bootButtonPin);
 
 
   // Normal operations
-  GetJSONsk(SERV, PORT);
+  if (STYP == "Kinko"){
+    GetJSONsk(SERV, PORT);
+  }
+  else{
+    GetJSONplaato(SERV, PORT);
+  }
 
 double br = beerRemaining(JKCAP2.toDouble(),JKEMP2.toDouble(),JKCUR2.toDouble());
 
