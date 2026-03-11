@@ -259,25 +259,19 @@ void DrawScreen() {
     }
 
     if (settingschanged == true){
-      String ImageURL = "";
-      // Kinko server sends JLOGO as just the URL
-      // Plaato server sends full url inc http://
-        if(STYP == "Kinko"){
-          ImageURL = "http://" + SERV + ":" + PORT + JLOGO2;
-          Serial.println(ImageURL);}
-        else{
-          ImageURL = JLOGO2;
+
+          String ImageURL = "http://" + SERV + ":" + PORT + JLOGO2;
+
           Serial.println(ImageURL);
-        }
         
         // create a temp string to strip the URL, leaving just filename
-        String tmpLogo = extractFilenameFromUrl(JLOGO2);
+        
 
-        if (SD.exists(tmpLogo)) {
+        if (SD.exists(JLOGO2)) {
           Serial.println("Image already exists on SD card.");
         } else {
           Serial.println("Image does not exist. Proceed to download.");
-          downloadImageToSD(ImageURL.c_str(), tmpLogo.c_str());
+          downloadImageToSD(ImageURL.c_str(), JLOGO2.c_str());
           delay(100);
         }
 
@@ -382,7 +376,8 @@ DeserializationError error = deserializeJson(doc, payload);
     JDESC2 = JDESC;
     settingschanged = true;
     }
-  String JLOGO = doc["logo_url"];
+
+  String JLOGO = extractFilenameFromUrl(doc["logo_url"]);
     if (JLOGO != JLOGO2){
         JLOGO2 = JLOGO;
         settingschanged = true;
