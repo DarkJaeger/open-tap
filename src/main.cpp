@@ -128,6 +128,28 @@ String normalizeServerType(const String& rawType) {
   return "Plaato";
 }
 
+String extractFilenameFromUrl(const String& url) {
+  String value = url;
+  value.trim();
+
+  int queryIndex = value.indexOf('?');
+  if (queryIndex >= 0) value = value.substring(0, queryIndex);
+
+  int fragmentIndex = value.indexOf('#');
+  if (fragmentIndex >= 0) value = value.substring(0, fragmentIndex);
+
+  int slashIndex = value.lastIndexOf('/');
+  if (slashIndex >= 0 && slashIndex < value.length() - 1) {
+    return value.substring(slashIndex + 1);
+  }
+
+  if (slashIndex == value.length() - 1) {
+    return "";
+  }
+
+  return value;
+}
+
 
 double KGtoPints(double empt, double full, double cur){
   double beer = cur - empt;
@@ -237,15 +259,24 @@ void DrawScreen() {
     }
 
     if (settingschanged == true){
+      String ImageURL = "";
+        if(STYP == "Kinko"){
+          ImageURL = "http://" + SERV + ":" + PORT + JLOGO2;
+          Serial.println(ImageURL);}
+        else{
+          ImageURL = JLOGO2;
+          Serial.println(ImageURL);
+        }
+        
 
-        String ImageURL = "http://" + SERV + ":" + PORT + JLOGO2;
-        Serial.println(ImageURL);
+        
 
-        if (SD.exists(JLOGO2)) {
+        if (SD.exists(extractFilenameFromUrl(JLOGO2))) {
           Serial.println("Image already exists on SD card.");
         } else {
           Serial.println("Image does not exist. Proceed to download.");
-          downloadImageToSD(ImageURL.c_str(), JLOGO2.c_str());
+          String tmp = extractFilenameFromUrl(JLOGO2);
+          downloadImageToSD(ImageURL.c_str(), tmp.c_str());
           delay(100);
         }
 
@@ -466,7 +497,7 @@ DeserializationError error = deserializeJson(doc, payload);
       if (JKCUR != JKCUR2) {
         JKCUR2 = JKCUR;
         //settingschanged = true;
-    }
+  }
 
   String JKGID = doc["keg_id"];
     if (JKGID != JKGID2){
