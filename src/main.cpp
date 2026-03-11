@@ -260,6 +260,8 @@ void DrawScreen() {
 
     if (settingschanged == true){
       String ImageURL = "";
+      // Kinko server sends JLOGO as just the URL
+      // Plaato server sends full url inc http://
         if(STYP == "Kinko"){
           ImageURL = "http://" + SERV + ":" + PORT + JLOGO2;
           Serial.println(ImageURL);}
@@ -268,15 +270,14 @@ void DrawScreen() {
           Serial.println(ImageURL);
         }
         
+        // create a temp string to strip the URL, leaving just filename
+        String tmpLogo = extractFilenameFromUrl(JLOGO2);
 
-        
-
-        if (SD.exists(extractFilenameFromUrl(JLOGO2))) {
+        if (SD.exists(tmpLogo)) {
           Serial.println("Image already exists on SD card.");
         } else {
           Serial.println("Image does not exist. Proceed to download.");
-          String tmp = extractFilenameFromUrl(JLOGO2);
-          downloadImageToSD(ImageURL.c_str(), tmp.c_str());
+          downloadImageToSD(ImageURL.c_str(), tmpLogo.c_str());
           delay(100);
         }
 
