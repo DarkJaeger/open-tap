@@ -262,7 +262,9 @@ void DrawScreen() {
 
           String ImageURL = "http://" + SERV + ":" + PORT + JLOGO2;
 
-          Serial.println(ImageURL);
+          Serial.println("ImageURL = " + ImageURL);
+
+          Serial.println("JLOGO2 = " + JLOGO2);
         
         // create a temp string to strip the URL, leaving just filename
         
