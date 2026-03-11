@@ -128,7 +128,7 @@ String normalizeServerType(const String& rawType) {
   return "Plaato";
 }
 
-String extractFilenameFromUrl(const String& url) {
+String extractPathFromUrl(const String& url) {
   String value = url;
   value.trim();
 
@@ -138,16 +138,57 @@ String extractFilenameFromUrl(const String& url) {
   int fragmentIndex = value.indexOf('#');
   if (fragmentIndex >= 0) value = value.substring(0, fragmentIndex);
 
-  int slashIndex = value.lastIndexOf('/');
-  if (slashIndex >= 0 && slashIndex < value.length() - 1) {
-    return value.substring(slashIndex + 1);
+  // Handle full URLs by keeping only the path section.
+  int schemeIndex = value.indexOf("://");
+  if (schemeIndex >= 0) {
+    int firstPathSlash = value.indexOf('/', schemeIndex + 3);
+    if (firstPathSlash >= 0) {
+      value = value.substring(firstPathSlash);
+    } else {
+      return "";
+    }
   }
 
-  if (slashIndex == value.length() - 1) {
+  value.replace('\\', '/');
+
+  while (value.startsWith("//")) {
+    value = value.substring(1);
+  }
+
+  if (value.length() == 0 || value.endsWith("/")) {
     return "";
   }
 
+  // Ensure SD path style starts with '/'.
+  if (!value.startsWith("/")) {
+    value = "/" + value;
+  }
+
   return value;
+}
+
+bool ensureParentDirectoriesExist(const String& filePath) {
+  if (filePath.length() == 0) return false;
+
+  String normalized = filePath;
+  normalized.replace('\\', '/');
+  if (!normalized.startsWith("/")) normalized = "/" + normalized;
+
+  int cursor = 1;
+  while (true) {
+    int slash = normalized.indexOf('/', cursor);
+    if (slash < 0) break;
+
+    String dir = normalized.substring(0, slash);
+    if (dir.length() > 0 && !SD.exists(dir.c_str())) {
+      if (!SD.mkdir(dir.c_str())) {
+        Serial.println("Failed to create SD directory: " + dir);
+        return false;
+      }
+    }
+    cursor = slash + 1;
+  }
+  return true;
 }
 
 
@@ -329,21 +370,61 @@ void DrawScreen() {
 
 //Get JSON from Plaato Keg Server
 void GetJSONplaato(String svr, String prt) {
-   
-  if (WiFi.status() == WL_CONNECTED) {
-    HTTPClient http;
+  if (WiFi.status() != WL_CONNECTED) {
+    Serial.println("WiFi not connected!");
+    return;
+  }
 
-    // Build URL
-    String url = "http://" + svr + ":" + prt + "/get_keg/" + KGID; // Add endpoint if needed
-    Serial.println("Sending GET to: " + url);
+  svr.trim();
+  prt.trim();
+  String kegId = KGID;
+  kegId.trim();
+  if (svr == "" || prt == "" || kegId == "") {
+    Serial.println("Plaato request aborted: server, port, or keg ID is blank.");
+    return;
+  }
 
-    http.begin(url); // Initialise HTTP connection
-    int httpCode = http.GET(); // Send GET request
+  int portNumber = prt.toInt();
+  if (portNumber <= 0 || portNumber > 65535) {
+    Serial.println("Plaato request aborted: invalid port '" + prt + "'.");
+    return;
+  }
 
-    if (httpCode > 0) {
-      Serial.printf("HTTP Response code: %d\n", httpCode);
-      String payload = http.getString(); // Get response body
-      Serial.println("Response: " + payload);
+  // Preflight TCP check to separate network/socket failures from HTTP-level failures.
+  WiFiClient tcpProbe;
+  tcpProbe.setTimeout(3000);
+  Serial.printf("Plaato TCP probe to %s:%d ...\n", svr.c_str(), portNumber);
+  if (!tcpProbe.connect(svr.c_str(), static_cast<uint16_t>(portNumber))) {
+    Serial.println("Plaato TCP probe failed: host unreachable, port closed, or blocked by firewall.");
+    tcpProbe.stop();
+    return;
+  }
+  Serial.println("Plaato TCP probe OK.");
+  tcpProbe.stop();
+
+  HTTPClient http;
+  WiFiClient client;
+
+  // Build URL
+  String url = "http://" + svr + ":" + prt + "/get_keg/" + kegId;
+  Serial.println("Sending GET to plaato: " + url);
+  Serial.println("WiFi local IP: " + WiFi.localIP().toString());
+
+  http.setConnectTimeout(8000);
+  http.setTimeout(12000);
+  http.setReuse(false);
+
+  if (!http.begin(client, url)) {
+    Serial.println("Plaato HTTP begin() failed.");
+    return;
+  }
+
+  int httpCode = http.GET(); // Send GET request
+  Serial.printf("Plaato HTTP code: %d (%s)\n", httpCode, http.errorToString(httpCode).c_str());
+
+  if (httpCode > 0) {
+    String payload = http.getString(); // Get response body
+    Serial.println("Response: " + payload);
 
 // JSON PROCESSOR HERE ###########
 JsonDocument doc;
@@ -379,7 +460,7 @@ DeserializationError error = deserializeJson(doc, payload);
     settingschanged = true;
     }
 
-  String JLOGO = extractFilenameFromUrl(doc["logo_url"]);
+  String JLOGO = extractPathFromUrl(doc["logo_url"]);
     if (JLOGO != JLOGO2){
         JLOGO2 = JLOGO;
         settingschanged = true;
@@ -415,14 +496,11 @@ DeserializationError error = deserializeJson(doc, payload);
 
 //###############################
 
-    } else {
-      Serial.printf("HTTP GET failed, error: %s\n", http.errorToString(httpCode).c_str());
-    }
-
-    http.end(); // Close connection
   } else {
-    Serial.println("WiFi not connected!");
+    Serial.println("Plaato HTTP GET failed before a valid response was received.");
   }
+
+  http.end(); // Close connection
 }
 
 
@@ -525,6 +603,11 @@ DeserializationError error = deserializeJson(doc, payload);
 bool downloadImageToSD(const char* url, const char* filename) {
   if (WiFi.status() != WL_CONNECTED) {
     Serial.println("WiFi not connected!");
+    return false;
+  }
+
+  if (!ensureParentDirectoriesExist(String(filename))) {
+    Serial.println("Image save aborted: could not prepare SD directories.");
     return false;
   }
 
@@ -871,7 +954,7 @@ if (!sdMounted) {
   }
 Serial.println("SETUP - REQUESTING JSON.");
 
-if (STYP = "Kinko"){
+if (STYP.c_str() == "Kinko"){
   GetJSONsk(SERV, PORT);
 }
 else{
@@ -992,7 +1075,7 @@ int buttonState = digitalRead(bootButtonPin);
 
 
   // Normal operations
-  if (STYP == "Kinko"){
+  if (STYP.c_str() == "Kinko"){
     GetJSONsk(SERV, PORT);
   }
   else{
