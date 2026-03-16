@@ -9,6 +9,7 @@
 #include "JPEGDecoder.h"
 #include <WiFi.h>
 #include <HTTPClient.h>
+#include <SPIFFS.h>
 #include <ArduinoJson.h>
 #include <Preferences.h>
 
@@ -33,8 +34,11 @@ const int bootButtonPin = 0;
 
 
 void drawSdJpeg(const char* filename, int xpos, int ypos);
+void drawFsJpeg(const char* filename, int xpos, int ypos);
 void jpegRender(int xpos, int ypos);
 bool downloadImageToSD(const char* url, const char* filename);
+bool downloadImageToFs(const char* url, const char* filename);
+String buildLogoCachePath(const String& rawPath);
 
 // TFT display
 TFT_eSPI tft = TFT_eSPI();
@@ -57,6 +61,8 @@ bool shouldSaveConfig = false;
 bool settingschanged = false;
 bool firstrun = true;
 bool barNeedsFullRefresh = true;
+bool sdReady = false;
+bool flashFsReady = false;
 
 String SERV = "192.168.8.123";
 String PORT = "8000";
@@ -191,6 +197,31 @@ bool ensureParentDirectoriesExist(const String& filePath) {
   return true;
 }
 
+String buildLogoCachePath(const String& rawPath) {
+  String path = rawPath;
+  path.trim();
+  if (path.length() == 0) return "/logo.jpg";
+
+  String sanitized = path;
+  sanitized.replace('\\', '_');
+  sanitized.replace('/', '_');
+  sanitized.replace('?', '_');
+  sanitized.replace('&', '_');
+  sanitized.replace('=', '_');
+  sanitized.replace('%', '_');
+  sanitized.replace(':', '_');
+
+  if (!sanitized.endsWith(".jpg") && !sanitized.endsWith(".jpeg")) {
+    sanitized += ".jpg";
+  }
+
+  if (!sanitized.startsWith("/")) {
+    sanitized = "/" + sanitized;
+  }
+
+  return sanitized;
+}
+
 
 double KGtoPints(double empt, double full, double cur){
   double beer = cur - empt;
@@ -302,6 +333,7 @@ void DrawScreen() {
     if (settingschanged == true){
 
           String ImageURL = "http://" + SERV + ":" + PORT + JLOGO2;
+          String cachedLogoPath = buildLogoCachePath(JLOGO2);
 
           Serial.println("ImageURL = " + ImageURL);
 
@@ -310,12 +342,24 @@ void DrawScreen() {
         // create a temp string to strip the URL, leaving just filename
         
 
-        if (SD.exists(JLOGO2)) {
-          Serial.println("Image already exists on SD card.");
+        if (sdReady) {
+          if (SD.exists(JLOGO2)) {
+            Serial.println("Image already exists on SD card.");
+          } else {
+            Serial.println("Image does not exist. Proceed to download.");
+            downloadImageToSD(ImageURL.c_str(), JLOGO2.c_str());
+            delay(100);
+          }
+        } else if (flashFsReady) {
+          if (SPIFFS.exists(cachedLogoPath)) {
+            Serial.println("Image already exists in SPIFFS cache.");
+          } else {
+            Serial.println("SPIFFS cache miss. Downloading image.");
+            downloadImageToFs(ImageURL.c_str(), cachedLogoPath.c_str());
+            delay(100);
+          }
         } else {
-          Serial.println("Image does not exist. Proceed to download.");
-          downloadImageToSD(ImageURL.c_str(), JLOGO2.c_str());
-          delay(100);
+          Serial.println("SD and SPIFFS unavailable; skipping logo cache/download.");
         }
 
         tft.fillScreen(bgColor);
@@ -359,9 +403,11 @@ void DrawScreen() {
 
 // convert percentage to pints... assume 1012 grams per litre
 //
-
-
-        drawSdJpeg(JLOGO2.c_str(), 20, 32);
+        if (sdReady) {
+          drawSdJpeg(JLOGO2.c_str(), 20, 32);
+        } else if (flashFsReady) {
+          drawFsJpeg(cachedLogoPath.c_str(), 20, 32);
+        }
         barNeedsFullRefresh = true;
         settingschanged = false;
     }
@@ -648,6 +694,54 @@ bool downloadImageToSD(const char* url, const char* filename) {
   }
 }
 
+bool downloadImageToFs(const char* url, const char* filename) {
+  if (!flashFsReady) {
+    Serial.println("SPIFFS not ready, skipping image download.");
+    return false;
+  }
+
+  if (WiFi.status() != WL_CONNECTED) {
+    Serial.println("WiFi not connected!");
+    return false;
+  }
+
+  HTTPClient http;
+  http.begin(url);
+  int httpCode = http.GET();
+
+  if (httpCode == HTTP_CODE_OK) {
+    File file = SPIFFS.open(filename, FILE_WRITE);
+    if (!file) {
+      Serial.println("Failed to open SPIFFS file for writing");
+      http.end();
+      return false;
+    }
+
+    WiFiClient* stream = http.getStreamPtr();
+    uint8_t buffer[512];
+    int len = http.getSize();
+
+    while (http.connected() && (len > 0 || len == -1)) {
+      size_t size = stream->available();
+      if (size) {
+        int c = stream->readBytes(buffer, ((size > sizeof(buffer)) ? sizeof(buffer) : size));
+        file.write(buffer, c);
+        if (len > 0) len -= c;
+      }
+      delay(1);
+    }
+
+    file.close();
+    Serial.println("Image downloaded and saved to SPIFFS!");
+    http.end();
+    return true;
+  }
+
+  Serial.printf("HTTP GET failed: %d\n", httpCode);
+  http.end();
+  return false;
+}
+
 // Load config from NVS Preferences
 void LoadConfig() {
   Preferences prefs;
@@ -739,6 +833,30 @@ void drawSdJpeg(const char* filename, int xpos, int ypos) {
   }
 }
 
+void drawFsJpeg(const char* filename, int xpos, int ypos) {
+  if (!flashFsReady) {
+    Serial.println("SPIFFS not ready, skipping JPEG draw.");
+    return;
+  }
+
+  File jpegFile = SPIFFS.open(filename, FILE_READ);
+
+  if (!jpegFile) {
+    Serial.print("ERROR: SPIFFS file \"");
+    Serial.print(filename);
+    Serial.println("\" not found!");
+    return;
+  }
+
+  bool decoded = JpegDec.decodeFsFile(jpegFile);
+
+  if (decoded) {
+    jpegRender(xpos, ypos);
+  } else {
+    Serial.println("JPEG file format not supported from SPIFFS!");
+  }
+}
+
 void jpegRender(int xpos, int ypos) {
 
   //jpegInfo(); // Print information from the JPEG file (could comment this line out)
@@ -818,6 +936,13 @@ void jpegRender(int xpos, int ypos) {
 void setup() {
   pinMode(bootButtonPin, INPUT_PULLUP);
   Serial.begin(115200);
+
+  flashFsReady = SPIFFS.begin(true);
+  if (flashFsReady) {
+    Serial.println("SPIFFS initialised.");
+  } else {
+    Serial.println("SPIFFS mount failed.");
+  }
 //#######################################################################
   // Initialise TFT
   tft.init();
@@ -849,6 +974,7 @@ while (attempt < MAX_RETRIES && !sdMounted) {
     } else {
         Serial.println("SD Card initialised.");
         sdMounted = true;
+      sdReady = true;
         
     }
 }
@@ -856,7 +982,8 @@ while (attempt < MAX_RETRIES && !sdMounted) {
 
 if (!sdMounted) {
     Serial.println("Failed to mount SD card after 5 attempts.");
-    ESP.restart();
+  Serial.println("Continuing without SD; logo rendering will be skipped.");
+  sdReady = false;
 }
 //####################################################################
 
