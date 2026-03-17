@@ -10,6 +10,7 @@
 #include <WiFi.h>
 #include <HTTPClient.h>
 #include <SPIFFS.h>
+#include <WebServer.h>
 #include <ArduinoJson.h>
 #include <Preferences.h>
 
@@ -39,6 +40,14 @@ void jpegRender(int xpos, int ypos);
 bool downloadImageToSD(const char* url, const char* filename);
 bool downloadImageToFs(const char* url, const char* filename);
 String buildLogoCachePath(const String& rawPath);
+void startLocalServer();
+void handleLocalRoot();
+void handleLocalSave();
+void pollBootButton();
+void serviceIdle(unsigned long durationMs);
+String normalizeServerType(const String& value);
+void ApplyConfiguredColors();
+void WriteCONFIG();
 
 // TFT display
 TFT_eSPI tft = TFT_eSPI();
@@ -63,6 +72,7 @@ bool firstrun = true;
 bool barNeedsFullRefresh = true;
 bool sdReady = false;
 bool flashFsReady = false;
+bool localServerStarted = false;
 
 String SERV = "192.168.8.123";
 String PORT = "8000";
@@ -86,6 +96,8 @@ String JKCUR2 = "";
 String JKGID2 = "";
 
 int centerX, centerY;
+
+WebServer localServer(80);
 
 
 //XPT2046_Touchscreen touchscreen(XPT2046_CS, XPT2046_IRQ);
@@ -116,6 +128,64 @@ String formatColor565(uint16_t color) {
   char out[5];
   snprintf(out, sizeof(out), "%04X", color);
   return String(out);
+}
+
+void handleLocalRoot() {
+  String html;
+  html.reserve(2000);
+  html += "<!doctype html><html><head><meta name='viewport' content='width=device-width,initial-scale=1'>";
+  html += "<title>Open Tap</title><style>body{font-family:sans-serif;max-width:720px;margin:24px auto;padding:0 16px;}label{display:block;margin-top:12px;font-weight:600;}input,select{width:100%;padding:10px;margin-top:4px;}button{margin-top:16px;padding:12px 16px;}small{color:#555;}</style></head><body>";
+  html += "<h1>Open Tap</h1>";
+  html += "<p>Device IP: " + WiFi.localIP().toString() + "</p>";
+  html += "<form method='post' action='/save'>";
+  html += "<label>Server IP<input name='serverip' value='" + SERV + "'></label>";
+  html += "<label>Server Port<input name='serverport' value='" + PORT + "'></label>";
+  html += "<label>Keg ID<input name='kegid' value='" + KGID + "'></label>";
+  html += "<label>Server Type<select name='server_type'>";
+  html += String("<option value='Plaato'") + (normalizeServerType(STYP) == "Plaato" ? " selected" : "") + ">Plaato</option>";
+  html += String("<option value='Kinko'") + (normalizeServerType(STYP) == "Kinko" ? " selected" : "") + ">Kinko</option></select></label>";
+  html += "<label>Background Color 565<input name='backcol' value='" + BCOL + "'></label>";
+  html += "<label>Foreground Color 565<input name='forecol' value='" + FCOL + "'></label>";
+  html += "<button type='submit'>Save</button></form>";
+  html += "<p><small>Changes save to device preferences and apply on the next refresh cycle.</small></p>";
+  html += "</body></html>";
+  localServer.send(200, "text/html", html);
+}
+
+void handleLocalSave() {
+  if (localServer.hasArg("serverip")) SERV = localServer.arg("serverip");
+  if (localServer.hasArg("serverport")) PORT = localServer.arg("serverport");
+  if (localServer.hasArg("kegid")) KGID = localServer.arg("kegid");
+  if (localServer.hasArg("server_type")) STYP = normalizeServerType(localServer.arg("server_type"));
+  if (localServer.hasArg("backcol")) BCOL = localServer.arg("backcol");
+  if (localServer.hasArg("forecol")) FCOL = localServer.arg("forecol");
+
+  SERV.trim();
+  PORT.trim();
+  KGID.trim();
+  BCOL.trim();
+  FCOL.trim();
+  ApplyConfiguredColors();
+
+  if (SERV != "" && PORT != "" && KGID != "" && STYP != "" && BCOL != "" && FCOL != "") {
+    WriteCONFIG();
+    settingschanged = true;
+    firstrun = true;
+    localServer.send(200, "text/html", "<html><body><p>Saved. <a href='/'>Back</a></p></body></html>");
+    return;
+  }
+
+  localServer.send(400, "text/html", "<html><body><p>Invalid config. <a href='/'>Back</a></p></body></html>");
+}
+
+void startLocalServer() {
+  if (localServerStarted || WiFi.status() != WL_CONNECTED) return;
+
+  localServer.on("/", HTTP_GET, handleLocalRoot);
+  localServer.on("/save", HTTP_POST, handleLocalSave);
+  localServer.begin();
+  localServerStarted = true;
+  Serial.println("Local config page available at http://" + WiFi.localIP().toString() + "/");
 }
 
 void ApplyConfiguredColors() {
@@ -224,16 +294,19 @@ String buildLogoCachePath(const String& rawPath) {
 
 
 double KGtoPints(double empt, double full, double cur){
+  (void)full;
   double beer = cur - empt;
-  double pints = beer / 0.6;
+  if (beer < 0.0) {
+    beer = 0.0;
+  }
+  double pints = beer / 0.473176;
   return pints;
 }
 
 
 double beerRemaining(double Full, double Empt, double Curr){
-
-double fullBeer = Full - Empt;
-double currentBeer = Curr - Empt;
+  double fullBeer = Full * 8.0;
+  double currentBeer = KGtoPints(Empt, Full, Curr);
 
     if (fullBeer <= 0) {
         // Avoid divide-by-zero or invalid data
@@ -1077,6 +1150,7 @@ if (!sdMounted) {
       Serial.println("SAVING CONFIG.");
       WriteCONFIG();
   }
+    startLocalServer();
     delay(6000);
   }
 Serial.println("SETUP - REQUESTING JSON.");
@@ -1094,17 +1168,11 @@ DrawScreen();
 firstrun = false;
 }
 
-void loop() {
+void pollBootButton() {
   static unsigned long pressStartTime = 0;
   static bool longPressTriggered = false;
 
-  //TS_Point p = touchscreen.getPoint();
-
-//Serial.println(p.x);
-//Serial.println(p.y);
-//Serial.println(p.z);
-  // Check if touch is valid (pressure and coordinates)
-int buttonState = digitalRead(bootButtonPin);
+  int buttonState = digitalRead(bootButtonPin);
 
   if (buttonState == LOW) { // Button is pressed
       if (pressStartTime == 0) {
@@ -1184,6 +1252,7 @@ int buttonState = digitalRead(bootButtonPin);
                   Serial.println("LOOP - SAVING CONFIG.");
                   WriteCONFIG();
               }
+              startLocalServer();
           delay(200); // Simple debounce
           }
 
@@ -1199,6 +1268,24 @@ int buttonState = digitalRead(bootButtonPin);
         pressStartTime = 0;
         longPressTriggered = false;
     }
+}
+
+void serviceIdle(unsigned long durationMs) {
+  unsigned long endTime = millis() + durationMs;
+  while (millis() < endTime) {
+    pollBootButton();
+    if (localServerStarted) {
+      localServer.handleClient();
+    }
+    delay(50);
+  }
+}
+
+void loop() {
+  pollBootButton();
+  if (localServerStarted) {
+    localServer.handleClient();
+  }
 
 
   // Normal operations
@@ -1222,7 +1309,7 @@ pnts = KGtoPints(JKEMP2.toDouble(),JKCAP2.toDouble(),JKCUR2.toDouble());
   
   DrawScreen();
   DrawRemaining(br);
-  delay(10000);
+  serviceIdle(10000);
 }
   
 
