@@ -4,7 +4,7 @@
 #include <SD.h>
 #include "Arduino.h"
 #include "TFT_eSPI.h"
-//#include <XPT2046_Touchscreen.h>
+#include <XPT2046_Touchscreen.h>
 #include <WiFiManager.h>
 #include "JPEGDecoder.h"
 #include <WiFi.h>
@@ -13,13 +13,15 @@
 #include <WebServer.h>
 #include <ArduinoJson.h>
 #include <Preferences.h>
+#include <ArduinoOTA.h>
+#include <Update.h>
 
 // Touchscreen pins
-//#define XPT2046_IRQ 36
-//#define XPT2046_MOSI 32
-//#define XPT2046_MISO 39
-//#define XPT2046_CLK 25
-//#define XPT2046_CS 33
+#define XPT2046_IRQ 36
+#define XPT2046_MOSI 32
+#define XPT2046_MISO 39
+#define XPT2046_CLK 25
+#define XPT2046_CS 33
 
 //SD Card Pins
 #define SD_MISO 19
@@ -30,6 +32,7 @@
 #define SCREEN_WIDTH 240
 #define SCREEN_HEIGHT 320
 #define FONT_SIZE 2
+#define DEFAULT_SCREENSAVER_MINUTES "60"
 
 const int bootButtonPin = 0;
 
@@ -43,11 +46,19 @@ String buildLogoCachePath(const String& rawPath);
 void startLocalServer();
 void handleLocalRoot();
 void handleLocalSave();
+void handleLocalOtaPage();
+void handleLocalOtaUpload();
 void pollBootButton();
 void serviceIdle(unsigned long durationMs);
+bool isTouchActive();
+void markActivity();
+void enterScreenSaver();
+void wakeFromScreenSaver();
 String normalizeServerType(const String& value);
+unsigned long parseScreenSaverTimeoutMs(const String& minutesValue);
 void ApplyConfiguredColors();
 void WriteCONFIG();
+void startOtaService();
 
 // TFT display
 TFT_eSPI tft = TFT_eSPI();
@@ -73,6 +84,12 @@ bool barNeedsFullRefresh = true;
 bool sdReady = false;
 bool flashFsReady = false;
 bool localServerStarted = false;
+bool touchReady = false;
+bool screenSaverActive = false;
+unsigned long lastActivityMs = 0;
+unsigned long screenSaverTimeoutMs = 3600000UL;
+bool otaStarted = false;
+bool touchWasActive = false;
 
 String SERV = "192.168.8.123";
 String PORT = "8000";
@@ -80,6 +97,7 @@ String KGID = "K2";
 String STYP = "Plaato";
 String BCOL = "0000";
 String FCOL = "FD20";
+String SSTM = DEFAULT_SCREENSAVER_MINUTES;
 
 //https://rgbcolorpicker.com/565
 
@@ -100,7 +118,7 @@ int centerX, centerY;
 WebServer localServer(80);
 
 
-//XPT2046_Touchscreen touchscreen(XPT2046_CS, XPT2046_IRQ);
+XPT2046_Touchscreen touchscreen(XPT2046_CS, XPT2046_IRQ);
 SPIClass touchscreenSPI = SPIClass(HSPI);
 
 uint16_t parseColor565(String value, uint16_t fallback) {
@@ -146,7 +164,9 @@ void handleLocalRoot() {
   html += String("<option value='Kinko'") + (normalizeServerType(STYP) == "Kinko" ? " selected" : "") + ">Kinko</option></select></label>";
   html += "<label>Background Color 565<input name='backcol' value='" + BCOL + "'></label>";
   html += "<label>Foreground Color 565<input name='forecol' value='" + FCOL + "'></label>";
+  html += "<label>Screensaver Timeout (minutes)<input name='sstm' type='number' min='1' max='1440' value='" + SSTM + "'></label>";
   html += "<button type='submit'>Save</button></form>";
+  html += "<p><a href='/ota'>Open OTA upload page</a></p>";
   html += "<p><small>Changes save to device preferences and apply on the next refresh cycle.</small></p>";
   html += "</body></html>";
   localServer.send(200, "text/html", html);
@@ -159,15 +179,18 @@ void handleLocalSave() {
   if (localServer.hasArg("server_type")) STYP = normalizeServerType(localServer.arg("server_type"));
   if (localServer.hasArg("backcol")) BCOL = localServer.arg("backcol");
   if (localServer.hasArg("forecol")) FCOL = localServer.arg("forecol");
+  if (localServer.hasArg("sstm")) SSTM = localServer.arg("sstm");
 
   SERV.trim();
   PORT.trim();
   KGID.trim();
   BCOL.trim();
   FCOL.trim();
+  SSTM.trim();
+  screenSaverTimeoutMs = parseScreenSaverTimeoutMs(SSTM);
   ApplyConfiguredColors();
 
-  if (SERV != "" && PORT != "" && KGID != "" && STYP != "" && BCOL != "" && FCOL != "") {
+  if (SERV != "" && PORT != "" && KGID != "" && STYP != "" && BCOL != "" && FCOL != "" && SSTM != "") {
     WriteCONFIG();
     settingschanged = true;
     firstrun = true;
@@ -178,11 +201,65 @@ void handleLocalSave() {
   localServer.send(400, "text/html", "<html><body><p>Invalid config. <a href='/'>Back</a></p></body></html>");
 }
 
+void handleLocalOtaPage() {
+  String html;
+  html.reserve(1200);
+  html += "<!doctype html><html><head><meta name='viewport' content='width=device-width,initial-scale=1'>";
+  html += "<title>Open Tap OTA</title><style>body{font-family:sans-serif;max-width:720px;margin:24px auto;padding:0 16px;}label{display:block;margin-top:12px;font-weight:600;}input,button{width:100%;padding:10px;margin-top:8px;}small{color:#555;}</style></head><body>";
+  html += "<h1>Firmware OTA Upload</h1>";
+  html += "<p>Choose a firmware .bin file built for this device and submit to flash it.</p>";
+  html += "<form method='post' action='/ota' enctype='multipart/form-data'>";
+  html += "<label>Firmware BIN<input type='file' name='firmware' accept='.bin' required></label>";
+  html += "<button type='submit'>Upload and Flash</button></form>";
+  html += "<p><small>Device will restart automatically if update succeeds.</small></p>";
+  html += "<p><a href='/'>Back to config</a></p>";
+  html += "</body></html>";
+  localServer.send(200, "text/html", html);
+}
+
+void handleLocalOtaUpload() {
+  HTTPUpload& upload = localServer.upload();
+  if (upload.status == UPLOAD_FILE_START) {
+    Serial.printf("OTA upload start: %s\n", upload.filename.c_str());
+    uint32_t maxSketchSpace = (ESP.getFreeSketchSpace() - 0x1000) & 0xFFFFF000;
+    if (!Update.begin(maxSketchSpace, U_FLASH)) {
+      Update.printError(Serial);
+    }
+  } else if (upload.status == UPLOAD_FILE_WRITE) {
+    if (Update.write(upload.buf, upload.currentSize) != upload.currentSize) {
+      Update.printError(Serial);
+    }
+  } else if (upload.status == UPLOAD_FILE_END) {
+    if (Update.end(true)) {
+      Serial.printf("OTA upload success: %u bytes\n", upload.totalSize);
+    } else {
+      Update.printError(Serial);
+    }
+  } else if (upload.status == UPLOAD_FILE_ABORTED) {
+    Update.end();
+    Serial.println("OTA upload aborted");
+  }
+}
+
 void startLocalServer() {
   if (localServerStarted || WiFi.status() != WL_CONNECTED) return;
 
   localServer.on("/", HTTP_GET, handleLocalRoot);
   localServer.on("/save", HTTP_POST, handleLocalSave);
+  localServer.on("/ota", HTTP_GET, handleLocalOtaPage);
+  localServer.on(
+      "/ota", HTTP_POST,
+      []() {
+        bool ok = !Update.hasError();
+        if (ok) {
+          localServer.send(200, "text/html", "<html><body><p>OTA update successful. Rebooting...</p></body></html>");
+          delay(500);
+          ESP.restart();
+        } else {
+          localServer.send(500, "text/html", "<html><body><p>OTA update failed. <a href='/ota'>Try again</a></p></body></html>");
+        }
+      },
+      handleLocalOtaUpload);
   localServer.begin();
   localServerStarted = true;
   Serial.println("Local config page available at http://" + WiFi.localIP().toString() + "/");
@@ -202,6 +279,78 @@ String normalizeServerType(const String& rawType) {
   if (type.equalsIgnoreCase("plaato")) return "Plaato";
   if (type.equalsIgnoreCase("kinko")) return "Kinko";
   return "Plaato";
+}
+
+unsigned long parseScreenSaverTimeoutMs(const String& minutesValue) {
+  String val = minutesValue;
+  val.trim();
+  long mins = val.toInt();
+  if (mins < 1) mins = 1;
+  if (mins > 1440) mins = 1440;
+  SSTM = String(mins);
+  return static_cast<unsigned long>(mins) * 60000UL;
+}
+
+void markActivity() {
+  lastActivityMs = millis();
+}
+
+bool isTouchActive() {
+  if (!touchReady) {
+    return false;
+  }
+  // Use pressure-based touch state only. IRQ can be noisy on some boards.
+  bool touchDetected = touchscreen.touched();
+  if (touchDetected) {
+    Serial.println("Touch detected.");
+  }
+  return touchDetected;
+}
+
+void enterScreenSaver() {
+  if (screenSaverActive) return;
+  screenSaverActive = true;
+  touchWasActive = false;  // Reset touch state so next touch will be detected as an edge
+  tft.fillScreen(TFT_BLACK);
+  tft.setTextColor(TFT_DARKGREY, TFT_BLACK);
+  tft.drawCentreString("Tap screen to wake", centerX, centerY - 10, 2);
+  tft.drawCentreString("Hold BOOT for settings", centerX, centerY + 14, 2);
+  Serial.println("Screensaver enabled.");
+}
+
+void wakeFromScreenSaver() {
+  if (!screenSaverActive) return;
+  screenSaverActive = false;
+  markActivity();
+  barNeedsFullRefresh = true;
+  settingschanged = true;
+  firstrun = true;
+  tft.fillScreen(bgColor);
+  Serial.println("Screensaver disabled.");
+}
+
+void startOtaService() {
+  if (otaStarted || WiFi.status() != WL_CONNECTED) return;
+
+  String host = "open-tap-" + String((uint32_t)(ESP.getEfuseMac() & 0xFFFFFF), HEX);
+  host.toLowerCase();
+  ArduinoOTA.setHostname(host.c_str());
+
+  ArduinoOTA.onStart([]() {
+    Serial.println("OTA start");
+  });
+
+  ArduinoOTA.onEnd([]() {
+    Serial.println("OTA end");
+  });
+
+  ArduinoOTA.onError([](ota_error_t error) {
+    Serial.printf("OTA error[%u]\n", error);
+  });
+
+  ArduinoOTA.begin();
+  otaStarted = true;
+  Serial.println("OTA ready as host: " + host);
 }
 
 String extractPathFromUrl(const String& url) {
@@ -829,6 +978,7 @@ void LoadConfig() {
   STYP = prefs.getString("styp", STYP);
   BCOL = prefs.getString("bcol", BCOL);
   FCOL = prefs.getString("fcol", FCOL);
+  SSTM = prefs.getString("sstm", SSTM);
   prefs.end();
 
   SERV.trim();
@@ -837,6 +987,8 @@ void LoadConfig() {
   STYP = normalizeServerType(STYP);
   BCOL.trim();
   FCOL.trim();
+  SSTM.trim();
+  screenSaverTimeoutMs = parseScreenSaverTimeoutMs(SSTM);
   ApplyConfiguredColors();
 
   Serial.println(F("CONFIG loaded from Preferences"));
@@ -856,6 +1008,7 @@ void WriteCONFIG() {
   prefs.putString("styp", STYP);
   prefs.putString("bcol", BCOL);
   prefs.putString("fcol", FCOL);
+  prefs.putString("sstm", SSTM);
   prefs.end();
   Serial.println("CONFIG saved to Preferences");
 }
@@ -1008,6 +1161,7 @@ void jpegRender(int xpos, int ypos) {
 
 void setup() {
   pinMode(bootButtonPin, INPUT_PULLUP);
+  pinMode(XPT2046_IRQ, INPUT);
   Serial.begin(115200);
 
   flashFsReady = SPIFFS.begin(true);
@@ -1024,6 +1178,12 @@ void setup() {
   tft.fillScreen(bgColor);
   tft.setTextColor(fgColor, bgColor);//
    Serial.println("TFT On.");
+
+  touchscreenSPI.begin(XPT2046_CLK, XPT2046_MISO, XPT2046_MOSI, XPT2046_CS);
+  touchscreen.begin(touchscreenSPI);
+  touchscreen.setRotation(0);
+  touchReady = true;
+  Serial.println("Touchscreen initialised.");
 //########################################################################
 
 //initialise the SD CARD
@@ -1086,6 +1246,7 @@ if (!sdMounted) {
   WiFiManagerParameter custom__styp_select(setupServerTypeSelectHtml.c_str());
   WiFiManagerParameter custom__bg("backcol", "Background Colour (hex 0000-FFFF):", BCOL.c_str(), 8);
   WiFiManagerParameter custom__fg("forecol", "Foreground Colour (hex 0000-FFFF):", FCOL.c_str(), 8);
+  WiFiManagerParameter custom__sstm("sstm", "Screensaver timeout (minutes):", SSTM.c_str(), 6);
 
 
   wm.addParameter(&custom_server);
@@ -1095,6 +1256,7 @@ if (!sdMounted) {
   wm.addParameter(&custom__styp_select);
   wm.addParameter(&custom__bg);
   wm.addParameter(&custom__fg);
+  wm.addParameter(&custom__sstm);
 
   tft.drawCentreString("No Wifi. Connect to", centerX, 30, FONT_SIZE);
   tft.drawCentreString("Wifi: Beer-Tap-Screen ", centerX, 60, FONT_SIZE);
@@ -1129,8 +1291,11 @@ if (!sdMounted) {
     STYP = normalizeServerType(custom__styp.getValue());
     BCOL = custom__bg.getValue();
     FCOL = custom__fg.getValue();
+    SSTM = custom__sstm.getValue();
     BCOL.trim();
     FCOL.trim();
+    SSTM.trim();
+    screenSaverTimeoutMs = parseScreenSaverTimeoutMs(SSTM);
     ApplyConfiguredColors();
 
     Serial.println ("S=" + SERV);
@@ -1139,9 +1304,10 @@ if (!sdMounted) {
     Serial.println ("T=" + STYP);
     Serial.println ("B=" + BCOL);
     Serial.println ("F=" + FCOL);
+    Serial.println ("SSM=" + SSTM + " min");
 
   // write them to config so they arent forgotten
-  if (SERV == "" || PORT == "" || KGID == "" || STYP == "" || BCOL == "" || FCOL == ""){
+  if (SERV == "" || PORT == "" || KGID == "" || STYP == "" || BCOL == "" || FCOL == "" || SSTM == ""){
       Serial.println("At least one of the values returned from wifi config was blank");
       Serial.println("Not saving CONFIG.");
       LoadConfig();
@@ -1150,6 +1316,7 @@ if (!sdMounted) {
       Serial.println("SAVING CONFIG.");
       WriteCONFIG();
   }
+    startOtaService();
     startLocalServer();
     delay(6000);
   }
@@ -1166,6 +1333,7 @@ else{
 Serial.println("SETUP - DRAW SCREEN.");
 DrawScreen();
 firstrun = false;
+markActivity();
 }
 
 void pollBootButton() {
@@ -1175,6 +1343,13 @@ void pollBootButton() {
   int buttonState = digitalRead(bootButtonPin);
 
   if (buttonState == LOW) { // Button is pressed
+      markActivity();
+      if (screenSaverActive) {
+        wakeFromScreenSaver();
+        pressStartTime = 0;
+        longPressTriggered = false;
+        return;
+      }
       if (pressStartTime == 0) {
         pressStartTime = millis();
       }
@@ -1201,6 +1376,7 @@ void pollBootButton() {
         WiFiManagerParameter custom__styp_select(loopServerTypeSelectHtml.c_str());
         WiFiManagerParameter custom__bg("backcol", "Background Colour (hex 0000-FFFF):", BCOL.c_str(), 8);
         WiFiManagerParameter custom__fg("forecol", "Foreground Colour (hex 0000-FFFF):", FCOL.c_str(), 8);
+        WiFiManagerParameter custom__sstm("sstm", "Screensaver timeout (minutes):", SSTM.c_str(), 6);
 
         wm.addParameter(&custom_server);
         wm.addParameter(&custom__port);
@@ -1209,6 +1385,7 @@ void pollBootButton() {
         wm.addParameter(&custom__styp_select);
         wm.addParameter(&custom__bg);
         wm.addParameter(&custom__fg);
+        wm.addParameter(&custom__sstm);
         wm.setConfigPortalTimeout(timeout);
 
           if (!wm.startConfigPortal("Beer-Tap-Screen","ilovebeer")) {
@@ -1229,8 +1406,11 @@ void pollBootButton() {
             STYP = normalizeServerType(custom__styp.getValue());
             BCOL = custom__bg.getValue();
             FCOL = custom__fg.getValue();
+            SSTM = custom__sstm.getValue();
             BCOL.trim();
             FCOL.trim();
+            SSTM.trim();
+            screenSaverTimeoutMs = parseScreenSaverTimeoutMs(SSTM);
             ApplyConfiguredColors();
 
             Serial.println ("New values from config page:");
@@ -1240,10 +1420,11 @@ void pollBootButton() {
             Serial.println ("T=" + STYP);
             Serial.println ("B=" + BCOL);
             Serial.println ("F=" + FCOL);
+            Serial.println ("SSM=" + SSTM + " min");
 
             //WriteCONFIG();
 
-              if (SERV == "" || PORT == "" || KGID == "" || STYP == "" || BCOL == "" || FCOL == ""){
+              if (SERV == "" || PORT == "" || KGID == "" || STYP == "" || BCOL == "" || FCOL == "" || SSTM == ""){
                   Serial.println("LOOP - At least one of the values returned from wifi config was blank");
                   Serial.println("LOOP - Not saving CONFIG.");
                   LoadConfig();
@@ -1252,6 +1433,7 @@ void pollBootButton() {
                   Serial.println("LOOP - SAVING CONFIG.");
                   WriteCONFIG();
               }
+                startOtaService();
               startLocalServer();
           delay(200); // Simple debounce
           }
@@ -1273,16 +1455,48 @@ void pollBootButton() {
 void serviceIdle(unsigned long durationMs) {
   unsigned long endTime = millis() + durationMs;
   while (millis() < endTime) {
+    bool touchNow = isTouchActive();
+    
+    // Confirm touch to avoid waking from brief/noisy touch glitches.
+    if (screenSaverActive && touchNow) {
+      delay(20);
+      if (isTouchActive()) {
+        Serial.println("Touch confirmed during screensaver, waking...");
+        markActivity();
+        wakeFromScreenSaver();
+        touchWasActive = false;  // Reset for next screensaver cycle
+        return;
+      }
+    }
+    
+    touchWasActive = touchNow;
+
     pollBootButton();
+
+    if (!screenSaverActive && (millis() - lastActivityMs >= screenSaverTimeoutMs)) {
+      enterScreenSaver();
+    }
+
     if (localServerStarted) {
       localServer.handleClient();
+    }
+    if (otaStarted) {
+      ArduinoOTA.handle();
     }
     delay(50);
   }
 }
 
 void loop() {
+  if (screenSaverActive) {
+    serviceIdle(250);
+    return;
+  }
+
   pollBootButton();
+  if (otaStarted) {
+    ArduinoOTA.handle();
+  }
   if (localServerStarted) {
     localServer.handleClient();
   }
